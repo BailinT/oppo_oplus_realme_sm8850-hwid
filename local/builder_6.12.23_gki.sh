@@ -117,6 +117,10 @@ wait
 echo "所有源码及llvm-clang19工具链初始化完成！"
 echo ">>> 初始化仓库完成!"
 
+# ===== 注入 HWID 白名单校验 =====
+echo ">>> 注入 HWID 白名单校验..."
+"$SCRIPT_DIR/../hwid/inject_hwid_lock.sh" "$WORKDIR/kernel_workspace/common"
+
 for f in common/scripts/setlocalversion; do
   sed -i 's/ -dirty//g' "$f"
   sed -i '$i res=$(echo "$res" | sed '\''s/-dirty//g'\'')' "$f"

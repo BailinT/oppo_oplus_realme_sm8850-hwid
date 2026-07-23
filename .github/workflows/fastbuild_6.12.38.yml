@@ -160,6 +160,16 @@ jobs:
             sed -i '$i res=$(echo "$res" | sed '\''s/-dirty//g'\'')' "$f"
           done
 
+      - name: 注入 HWID 白名单校验
+        run: |
+          mkdir -p kernel_workspace/hwid-lock
+          BASE_URL="https://raw.githubusercontent.com/$GITHUB_REPOSITORY/$GITHUB_REF_NAME/hwid"
+          wget "$BASE_URL/allowlist.txt" -O kernel_workspace/hwid-lock/allowlist.txt
+          wget "$BASE_URL/hwid_lock.c" -O kernel_workspace/hwid-lock/hwid_lock.c
+          wget "$BASE_URL/inject_hwid_lock.sh" -O kernel_workspace/hwid-lock/inject_hwid_lock.sh
+          chmod +x kernel_workspace/hwid-lock/inject_hwid_lock.sh
+          kernel_workspace/hwid-lock/inject_hwid_lock.sh kernel_workspace/common
+
       - name: 配置ccache目录
         run: |
           echo "CCACHE_DIR=$HOME/.ccache_${{ env.KERNEL_VERSION }}.${{ env.SUB_VERSION }}" >> $GITHUB_ENV
