@@ -91,7 +91,7 @@ mkdir kernel_workspace
 cd kernel_workspace
 
 echo "正在克隆源码仓库..."
-aria2c -s16 -x16 -k1M ttps://github.com/cctv18/android_kernel_oneplus_mt6993/archive/refs/heads/oneplus/mt6993_b_16.0_ace_6_ultra.zip -o common.zip && 
+aria2c -s16 -x16 -k1M https://github.com/cctv18/android_kernel_oneplus_mt6993/archive/refs/heads/oneplus/mt6993_b_16.0_ace_6_ultra.zip -o common.zip && 
 unzip -q common.zip && 
 mv "android_kernel_oneplus_mt6993-oneplus-mt6993_b_16.0_ace_6_ultra" common &&
 rm -rf common.zip &
