@@ -401,7 +401,7 @@ jobs:
           echo "CONFIG_ANDROID_BINDER_IPC_RUST=m" >> ./common/arch/arm64/configs/gki_defconfig
           # 应用 CVE_2026_43499 修复补丁
           cd common
-          wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/cve-2026-43499-rtmutex-6.12.patch
+          cp "$GITHUB_WORKSPACE/other_patch/cve-2026-43499-rtmutex-6.12.patch" .
           patch -p1 -F 3 < cve-2026-43499-rtmutex-6.12.patch
           
       - name: 启用网络功能增强优化配置
