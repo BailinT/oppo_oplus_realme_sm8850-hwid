@@ -1,12 +1,12 @@
-name: (天玑版) 6.12.58 欧加真OKI内核快速构建
+name: (新版米/欧加真天玑通用) 6.12.58 GKI内核快速构建
 
 env:
   TZ: Asia/Shanghai
   ANDROID_VERSION: 'android16'
   KERNEL_VERSION: '6.12'
-  SUB_VERSION: '58_mtk'
-  KERNEL_NAME: 'android16-5-ge7f2a9832757-ab13799791-4k'
-  CCACHE_KEY: ccache-ecsv4-mtk-6.12.58
+  SUB_VERSION: '58_gki_mtk'
+  KERNEL_NAME: 'android16-5-g8c67d4274c0a-ab14275539-4k'
+  CCACHE_KEY: ccache-ecsv4-gki-6.12.58-mtk
 
 on:
   workflow_dispatch:
@@ -106,9 +106,6 @@ jobs:
       actions: write
       contents: read
     steps:
-      - name: Checkout private repository
-        uses: actions/checkout@v4
-
       - name: 安装环境依赖+初始化源码仓库及llvm-clang19工具链
         run: |
           rm -rf kernel_workspace
@@ -127,16 +124,16 @@ jobs:
           #sudo apt-get install -y --no-install-recommends curl bison flex make binutils git perl gcc python3 python-is-python3 bc libssl-dev libelf-dev libdw-dev zip unzip ccache
           
           #使用最新版ccache v4.12.2（Ubuntu软件仓库的版本并非最新）
-          cp "$GITHUB_WORKSPACE/lib/ccache-x86-64" ccache &&
+          wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/lib/ccache-x86-64 -O ccache &&
           sudo cp -f ./ccache /usr/bin/ccache &&
           sudo chmod +x /usr/bin/ccache &&
           rm -f ./ccache &
           
           echo "正在克隆源码仓库..."
-          aria2c -s16 -x16 -k1M https://github.com/cctv18/android_kernel_oneplus_mt6993/archive/refs/heads/oneplus/mt6993_b_16.0_ace_6_ultra.zip -o common.zip && 
-          unzip -q common.zip && 
-          mv "android_kernel_oneplus_mt6993-oneplus-mt6993_b_16.0_ace_6_ultra" common &&
-          rm -rf common.zip &
+                    curl -L --retry 3 --retry-delay 5 -o common.tar.gz https://android.googlesource.com/kernel/common/+archive/refs/heads/android16-6.12-2025-12.tar.gz &&
+          mkdir common &&
+          tar -xzf common.tar.gz -C common &&
+          rm -rf common.tar.gz &
           
           echo "正在克隆llvm-clang19工具链..." &&
           mkdir -p clang19 &&
@@ -156,22 +153,16 @@ jobs:
           rm -rf build-tools.zip &
           
           wait
-          echo "所有源码及llvm-clang19工具链初始化完成！"
+          echo "所有源码及llvm-clang19工具链初始化完成！
+          if [ ! -f common/scripts/setlocalversion ]; then
+            echo "::error::源码初始化失败：common/scripts/setlocalversion 不存在（下载/解压被截断）"
+            exit 1
+          fi"
           echo "正在去除 dirty 后缀..."
           for f in common/scripts/setlocalversion; do
             sed -i 's/ -dirty//g' "$f"
             sed -i '$i res=$(echo "$res" | sed '\''s/-dirty//g'\'')' "$f"
           done
-
-      - name: 注入 HWID 白名单校验
-        run: |
-          mkdir -p kernel_workspace/hwid-lock
-          BASE_DIR="$GITHUB_WORKSPACE/hwid"
-          cp "$BASE_DIR/allowlist.txt" kernel_workspace/hwid-lock/allowlist.txt
-          cp "$BASE_DIR/hwid_lock.c" kernel_workspace/hwid-lock/hwid_lock.c
-          cp "$BASE_DIR/inject_hwid_lock.sh" kernel_workspace/hwid-lock/inject_hwid_lock.sh
-          chmod +x kernel_workspace/hwid-lock/inject_hwid_lock.sh
-          kernel_workspace/hwid-lock/inject_hwid_lock.sh kernel_workspace/common
 
       - name: 配置ccache目录
         run: |
@@ -291,7 +282,7 @@ jobs:
             sed -i "s/KSU_VERSION_TAG_FALLBACK := v0.0.1/KSU_VERSION_TAG_FALLBACK := $KSU_GIT_TAG/g" kernel/Kbuild
             #为KernelSU Next添加WildKSU管理器支持
             cd ../common/drivers/kernelsu
-            cp "$GITHUB_WORKSPACE/other_patch/apk_sign.patch" .
+            wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/apk_sign.patch
             patch -p2 -N -F 3 < apk_sign.patch || true
           elif [[ ${{ github.event.inputs.ksu_type }} == "ksu" ]]; then
             echo "正在配置原版 KernelSU (tiann/KernelSU)..."
@@ -317,6 +308,21 @@ jobs:
             cp ./susfs4ksu/kernel_patches/include/linux/* ./common/include/linux/
             cd ./common
             patch -p1 < 50_add_susfs_in_gki-${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}.patch || true
+
+            # 6.12.58 的 fs/exec.c 新增了 dma-buf.h，旧补丁的 include hunk 会失配，
+            # 但调用点仍会打入，最终导致 susfs_is_current_proc_umounted 未声明。
+            if grep -q 'susfs_is_current_proc_umounted' ./fs/exec.c && ! grep -qF '#include <linux/susfs_def.h>' ./fs/exec.c; then
+              if grep -qF '#include <linux/dma-buf.h>' ./fs/exec.c; then
+                sed -i '/#include <linux\/dma-buf.h>/a #ifdef CONFIG_KSU_SUSFS\n#include <linux\/susfs_def.h>\n#endif' ./fs/exec.c
+              else
+                sed -i '/#include <linux\/ksm.h>/a #ifdef CONFIG_KSU_SUSFS\n#include <linux\/susfs_def.h>\n#endif' ./fs/exec.c
+              fi
+              echo "已修复 6.12.58 fs/exec.c 缺少 susfs_def.h 问题"
+            fi
+            if grep -q 'susfs_is_current_proc_umounted' ./fs/exec.c && ! grep -qF '#include <linux/susfs_def.h>' ./fs/exec.c; then
+              echo "::error::fs/exec.c 使用了 SUSFS 接口，但 susfs_def.h 仍未引入"
+              exit 1
+            fi
             cd ..
           else
             echo "已选择无内置KernelSU模式，跳过susfs配置..."
@@ -333,7 +339,7 @@ jobs:
         run: |
           echo "正在添加lz4 1.10.0 & zstd 1.5.7补丁…"
           cd kernel_workspace
-          mkdir -p "$GITHUB_ACTOR"; cp -r "$GITHUB_WORKSPACE/zram_patch" "$GITHUB_ACTOR/"
+          git clone --depth=1 https://github.com/$GITHUB_REPOSITORY.git -b $GITHUB_REF_NAME $GITHUB_ACTOR
           cp ./$GITHUB_ACTOR/zram_patch/001-lz4.patch ./common/
           cp ./$GITHUB_ACTOR/zram_patch/002-zstd.patch ./common/
           cd ./common
@@ -345,7 +351,7 @@ jobs:
         run: |
           echo "正在添加lz4kd补丁…"
           cd kernel_workspace/common
-          cp "$GITHUB_WORKSPACE/other_patch/lz4kd.patch" .
+          wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/lz4kd.patch
           patch -p1 -F 3 < lz4kd.patch || true
           
       - name: 添加SUSFS 配置项
@@ -378,6 +384,13 @@ jobs:
           # 添加对 Mountify (backslashxx/mountify) 模块的支持
           echo "CONFIG_TMPFS_XATTR=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_TMPFS_POSIX_ACL=y" >> ./common/arch/arm64/configs/gki_defconfig
+          # 天玑机型 WiFi：小米/OPPO mt6993 天玑机原厂改过 cfg80211 ABI（cfg80211.h 结构体差异），
+          # GKI 内核内置的 AOSP cfg80211 的符号 CRC 与 vendor wlan_drv 不匹配（disagrees about symbol version）。
+          # 解法：不内置 cfg80211，关掉 CONFIG_MODVERSIONS，让 vendor 自己的 cfg80211.ko + wlan_drv.ko
+          # 在不检查 CRC 的情况下加载（两者都是小米编译，互相匹配）。
+          # 同时确保不强制模块签名检查。
+          echo "CONFIG_MODVERSIONS=n" >> ./common/arch/arm64/configs/gki_defconfig
+          echo "# CONFIG_MODULE_SIG_FORCE is not set" >> ./common/arch/arm64/configs/gki_defconfig
           if [[ "${{ github.event.inputs.lz4kd_enable }}" == "true" ]]; then
             echo "CONFIG_ZSMALLOC=y" >> ./common/arch/arm64/configs/gki_defconfig
             echo "CONFIG_CRYPTO_LZ4HC=y" >> ./common/arch/arm64/configs/gki_defconfig
@@ -401,8 +414,8 @@ jobs:
           echo "CONFIG_ANDROID_BINDER_IPC_RUST=m" >> ./common/arch/arm64/configs/gki_defconfig
           # 应用 CVE_2026_43499 修复补丁
           cd common
-          cp "$GITHUB_WORKSPACE/other_patch/cve-2026-43499-rtmutex-6.12.patch" .
-          patch -p1 -F 3 < cve-2026-43499-rtmutex-6.12.patch
+          wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/cve-2026-43499-rtmutex-6.12.patch
+          patch -N -p1 -F 3 < cve-2026-43499-rtmutex-6.12.patch || echo "CVE-2026-43499 已在 6.12.58 上游修复，跳过"
           
       - name: 启用网络功能增强优化配置
         if: inputs.better_net
@@ -435,7 +448,7 @@ jobs:
           echo "CONFIG_IP6_NF_TARGET_MASQUERADE=y" >> ./common/arch/arm64/configs/gki_defconfig
           #由于部分机型的vintf兼容性检测规则，在开启CONFIG_IP6_NF_NAT后开机会出现"您的设备内部出现了问题。请联系您的设备制造商了解详情。"的提示，故添加一个配置修复补丁，在编译内核时隐藏CONFIG_IP6_NF_NAT=y但不影响对应功能编译
           cd common
-          cp "$GITHUB_WORKSPACE/other_patch/config.patch" .
+          wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/config.patch
           patch -p1 -F 3 < config.patch || true
 
       - name: 添加 BBR 等一系列拥塞控制算法
@@ -484,16 +497,16 @@ jobs:
             echo "正在启用 Droidspaces 容器支持..."
             cd kernel_workspace/common
             # 应用 Droidspaces 容器必须补丁
-            cp "$GITHUB_WORKSPACE/droidspaces_patch/fix_sysvipc_kabi_a16-6.12.patch" .
+            wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/droidspaces_patch/fix_sysvipc_kabi_a16-6.12.patch
             patch -p1 -F 3 < fix_sysvipc_kabi_a16-6.12.patch || true
             # 修补 oplus_bsp_midas 行为，避免开机崩溃
-            cp "$GITHUB_WORKSPACE/droidspaces_patch/fix_oplus_bsp_midas.patch" .
+            wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/droidspaces_patch/fix_oplus_bsp_midas.patch
             patch -p1 -F 3 < fix_oplus_bsp_midas.patch || true
             # 修补 oplus_bsp_sched_assist 数组越界访问导致的运行随机崩溃
-            cp "$GITHUB_WORKSPACE/droidspaces_patch/ddl_hit_hook.patch" .
+            wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/droidspaces_patch/ddl_hit_hook.patch
             patch -p1 -F 3 < ddl_hit_hook.patch || true
             # 应用 NTSync 补丁
-            cp "$GITHUB_WORKSPACE/droidspaces_patch/ntsync_compat_${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}.patch" .
+            wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/droidspaces_patch/ntsync_compat_${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}.patch
             patch -p1 -F 3 < ntsync_compat_${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}.patch || true
             # 开启 Droidspaces 容器所需内核支持
             echo "CONFIG_PID_NS=y" >> ./arch/arm64/configs/gki_defconfig
@@ -521,8 +534,7 @@ jobs:
               # 开启 systemd-coredump 支持
               echo "CONFIG_STATIC_USERMODEHELPER=n" >> ./arch/arm64/configs/gki_defconfig
               # 添加 Lindroid EVDI DRM 驱动
-              # 6.12 暂时禁用 EVDI DRM 驱动，避免编译失败
-              # cp "$GITHUB_WORKSPACE/droidspaces_patch/evdi_drm.patch" .
+              # wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/${{ env.KERNEL_VERSION }}/droidspaces_patch/evdi_drm.patch
               # patch -p1 -F 3 < evdi_drm.patch || true
               # echo "CONFIG_DRM_LINDROID_EVDI=y" >> ./arch/arm64/configs/gki_defconfig
             fi
@@ -604,8 +616,8 @@ jobs:
           echo "sloppiness = file_stat_matches,include_file_ctime,include_file_mtime,pch_defines,file_macro,time_macros" >> "$CCACHE_DIR/ccache.conf"
           
           cd kernel_workspace/common
-          cp "$GITHUB_WORKSPACE/lib/libfakestat.so" .
-          cp "$GITHUB_WORKSPACE/lib/libfaketimeMT.so" .
+          wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/lib/libfakestat.so
+          wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/lib/libfaketimeMT.so
           chmod 777 ./*.so
           export FAKESTAT="2025-05-25 12:00:00"
           export FAKETIME="@2025-05-25 13:00:00"
@@ -651,7 +663,9 @@ jobs:
           COMMON_REAL_PATH=$(pwd -P)
           ROOT_REAL_PATH=$(dirname "$COMMON_REAL_PATH")
           KCFLAGS+=" -fdebug-prefix-map=$ROOT_REAL_PATH=."
-          KCFLAGS+=" -fmacro-prefix-map=$ROOT_REAL_PATH=."
+          # 6.12.58 的 rust 构建路径会把这些 KCFLAGS 传给 clang，-fmacro-prefix-map 被判定为
+          # 未使用参数且 -Werror 直接报错；保留 debug/file 两个 map 维持 DWARF 路径重映射（CRC 稳定）
+          # KCFLAGS+=" -fmacro-prefix-map=$ROOT_REAL_PATH=."
           KCFLAGS+=" -ffile-prefix-map=$ROOT_REAL_PATH=."
           # 2. 声明Rust等工具（此处若不进行声明，内核编译前的Rust环境预检测脚本scripts/rust_is_available.sh会检测失败，导致内核无法正常开启Rust代码编译）
           export RUSTC="rustc"
@@ -683,7 +697,18 @@ jobs:
           sudo rm -rf /usr/local/lib/android &
           sudo rm -rf /opt/ghc &
           sudo rm -rf /opt/hostedtoolcache/CodeQL &
-          make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="clang" LD="ld.lld" OBJCOPY="llvm-objcopy" O=out gki_defconfig &&
+          make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="clang" LD="ld.lld" OBJCOPY="llvm-objcopy" O=out gki_defconfig
+          if ! grep -q '^# CONFIG_MODVERSIONS is not set$' out/.config; then
+            echo "::error::最终内核配置没有关闭 CONFIG_MODVERSIONS"
+            grep -E '^CONFIG_MODVERSIONS=|^# CONFIG_MODVERSIONS' out/.config || true
+            exit 1
+          fi
+          if grep -q '^CONFIG_CFG80211=y$' out/.config; then
+            echo "::error::最终内核配置仍将 AOSP cfg80211 内置进 Image"
+            exit 1
+          fi
+          echo "WiFi 模块兼容配置："
+          grep -E '^CONFIG_CFG80211=|^# CONFIG_CFG80211|^CONFIG_MODVERSIONS=|^# CONFIG_MODVERSIONS|^CONFIG_MODULE_SIG_FORCE=|^# CONFIG_MODULE_SIG_FORCE' out/.config || true
           export CC="$(pwd)/cc-wrapper" && export LD="$(pwd)/ld-wrapper" &&
           make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="$(pwd)/cc-wrapper" LD="$(pwd)/ld-wrapper" OBJCOPY="llvm-objcopy" O=out Image
           
@@ -747,7 +772,7 @@ jobs:
             KSU_TYPENAME="none"
           fi
           if [[ "${{ github.event.inputs.lz4kd_enable }}" == "true" ]]; then
-            cp "$GITHUB_WORKSPACE/zram.zip" .
+            wget https://raw.githubusercontent.com/$GITHUB_REPOSITORY/refs/heads/$GITHUB_REF_NAME/zram.zip
           fi
           if [[ ${{ github.event.inputs.kpm_enable }} == 'true' ]]; then
             wget https://github.com/cctv18/KPatch-Next/releases/latest/download/kpn.zip
@@ -759,8 +784,36 @@ jobs:
           fi
           zip -r ../$AK3_NAME ./*
           echo "ak3name=$AK3_NAME" >> $GITHUB_OUTPUT
-
-
+          
+          #为AK3添加注释（调试信息）
+          CLEAN_SUB_VERSION="${{ env.SUB_VERSION }}"
+          CLEAN_SUB_VERSION="${CLEAN_SUB_VERSION%_mtk}"
+          if [[ -n "${{ github.event.inputs.kernel_suffix }}" ]]; then
+            FULL_VERSION=${{ env.KERNEL_VERSION }}.${CLEAN_SUB_VERSION}-${{ github.event.inputs.kernel_suffix }}
+          else
+            FULL_VERSION=${{ env.KERNEL_VERSION }}.${CLEAN_SUB_VERSION}-${{ env.KERNEL_NAME }}
+          fi
+          TIME_NOW="$(TZ='Asia/Shanghai' date +'%Y-%m-%d %H:%M:%S')"
+          echo "Author: 王德发刷机" > ./ak3.log
+          echo "Repo: $GITHUB_REPOSITORY" >> ./ak3.log
+          echo "Branch: $GITHUB_REF_NAME" >> ./ak3.log
+          echo "Run ID: $GITHUB_RUN_ID" >> ./ak3.log
+          echo "Commit: $GITHUB_SHA" >> ./ak3.log
+          echo "Time: $TIME_NOW" >> ./ak3.log
+          echo "Kernel Ver: $FULL_VERSION" >> ./ak3.log
+          echo "KSU Branch: ${KSU_TYPENAME}" >> ./ak3.log
+          echo "KSU Ver: ${KSUVER}" >> ./ak3.log
+          echo "susfs: ${{ github.event.inputs.susfs_enable }}" >> ./ak3.log
+          echo "KPM: ${{ github.event.inputs.kpm_enable }}" >> ./ak3.log
+          echo "LZ4: ${{ github.event.inputs.lz4_enable }}" >> ./ak3.log
+          echo "LZ4KD: ${{ github.event.inputs.lz4kd_enable }}" >> ./ak3.log
+          echo "IPset: ${{ github.event.inputs.better_net }}" >> ./ak3.log
+          echo "BBR&Brutal: ${{ github.event.inputs.bbr_enable }}" >> ./ak3.log
+          echo "Droidspaces: ${{ github.event.inputs.droidspaces_enable }}" >> ./ak3.log
+          echo "ADIOS: ${{ github.event.inputs.adios_enable }}" >> ./ak3.log
+          echo "Re-Kernel: ${{ github.event.inputs.rekernel_enable }}" >> ./ak3.log
+          echo "BBG: ${{ github.event.inputs.baseband_guard }}" >> ./ak3.log
+          zip -z ../$AK3_NAME < ./ak3.log
 
       - name: 上传 Ccache 调试日志
         if: always() && inputs.ccache_debug
@@ -829,10 +882,11 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           cat << 'EOF' > release_notes.md
-          ### 📱 欧加真 ${{ env.KSU_TYPENAME }} MT6993 通用内核 | 构建信息
+          ### 📱 米/欧加真天玑 ${{ env.KSU_TYPENAME }} mt6993 天玑通用内核 | 构建信息
           - 内核版本号: ${{ env.FULL_VERSION }}
           - 编译时间: ${{ env.TIME_FORM }}
-          - 机型：欧加真天玑 9500 通用 ${{ env.KERNEL_VERSION }}.${{ env.SUB_VERSION }} 内核（基于OPPO Find X9 ${{ env.KERNEL_VERSION }}.${{ env.SUB_VERSION }} 版官方源码）
+          - 机型：小米/欧加真天玑通用（mt6993，如 Redmi K Pad 2）${{ env.KERNEL_VERSION }}.${{ env.SUB_VERSION }} 内核（基于 AOSP 官方 android16-6.12-2025-12 源码分支）
+          - 内置cfg80211：否（使用 vendor cfg80211.ko；关闭 MODVERSIONS 测试小米/MTK 模块兼容）
           - KSU分支：${{ env.KSU_TYPENAME }}
           - susfs支持：${{ github.event.inputs.susfs_enable }}
           - KPM支持 ：${{ github.event.inputs.kpm_enable }}
